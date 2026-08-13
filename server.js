@@ -20,14 +20,63 @@ const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY;
 const STORAGE_BUCKET = process.env.SUPABASE_STORAGE_BUCKET || 'communications-appel';
 const PORT = process.env.PORT || 3000;
 
+// SMTP pour la confirmation automatique d'inscription (optionnel — si absent, l'inscription
+// fonctionne quand même, simplement sans email automatique). Variables à définir sur Render/Railway.
+const SMTP_HOST = process.env.SMTP_HOST;
+const SMTP_PORT = process.env.SMTP_PORT || '587';
+const SMTP_USER = process.env.SMTP_USER;
+const SMTP_PASS = process.env.SMTP_PASS;
+const SMTP_FROM = process.env.SMTP_FROM || SMTP_USER;
+
 if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) {
   console.error('❌ Variables d\'environnement manquantes : SUPABASE_URL et SUPABASE_SERVICE_KEY sont obligatoires.');
   console.error('   Voir README.md pour la configuration sur Render.');
   process.exit(1);
 }
+if (!SMTP_HOST || !SMTP_USER || !SMTP_PASS) {
+  console.warn('⚠️  SMTP non configuré (SMTP_HOST/SMTP_USER/SMTP_PASS) — les emails de confirmation d\'inscription ne seront pas envoyés automatiquement.');
+}
 
 function sbHeaders(extra = {}) {
   return { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`, ...extra };
+}
+
+// Réutilise la même logique que le serveur local (main.js) — best-effort, ne bloque jamais l'inscription.
+async function envoyerEmailConfirmationInscription(destinataire, d, congresNom) {
+  try {
+    if (!SMTP_HOST || !SMTP_USER || !SMTP_PASS) return;
+    const nodemailer = require('nodemailer');
+    const t = nodemailer.createTransport({
+      host: SMTP_HOST, port: parseInt(SMTP_PORT) || 587, secure: SMTP_PORT == 465,
+      auth: { user: SMTP_USER, pass: SMTP_PASS }
+    });
+    const html = `
+      <div style="font-family:Arial,sans-serif;max-width:520px;margin:0 auto;color:#16262B">
+        <div style="background:#1B4B5A;color:#fff;padding:20px 24px;border-radius:12px 12px 0 0">
+          <h2 style="margin:0;font-size:18px">${escapeHtml(congresNom)}</h2>
+          <p style="margin:4px 0 0;font-size:13px;color:#C8DAD9">Confirmation d'inscription</p>
+        </div>
+        <div style="background:#fff;border:1px solid #DFE6E4;border-top:none;padding:22px 24px;border-radius:0 0 12px 12px">
+          <p>Bonjour <strong>${escapeHtml(d.prenom)} ${escapeHtml(d.nom)}</strong>,</p>
+          <p>Votre inscription au congrès <strong>${escapeHtml(congresNom)}</strong> a bien été enregistrée. Elle sera confirmée prochainement par l'équipe d'organisation.</p>
+          <table style="width:100%;border-collapse:collapse;margin:16px 0;font-size:13.5px">
+            <tr><td style="padding:6px 0;color:#54666C">Formule</td><td style="padding:6px 0;text-align:right;font-weight:600">${escapeHtml(d.formule || '—')}</td></tr>
+            ${d.montant_total ? `<tr><td style="padding:6px 0;color:#54666C">Montant total</td><td style="padding:6px 0;text-align:right;font-weight:600">${Number(d.montant_total).toLocaleString('fr-FR')} DZD</td></tr>` : ''}
+            ${d.accompagnateur === 'Oui' ? `<tr><td style="padding:6px 0;color:#54666C">Accompagnateur</td><td style="padding:6px 0;text-align:right;font-weight:600">${escapeHtml(d.accomp_nom || 'Oui')}</td></tr>` : ''}
+          </table>
+          <p style="font-size:13.5px">
+            ${d.virement_effectue === 'Oui'
+              ? "N'oubliez pas d'envoyer votre justificatif de virement à l'adresse de contact indiquée sur la page d'inscription du congrès."
+              : "Merci d'effectuer votre virement bancaire dans un délai de 10 jours suivant cette inscription."}
+          </p>
+          <p style="font-size:12px;color:#8b84a8;margin-top:20px">Cet email a été envoyé automatiquement suite à votre inscription en ligne.</p>
+        </div>
+      </div>
+    `;
+    await t.sendMail({ from: SMTP_FROM || SMTP_USER, to: destinataire, subject: `Confirmation d'inscription — ${congresNom}`, html });
+  } catch (e) {
+    console.error('[Email confirmation inscription]', e.message);
+  }
 }
 
 async function getAppelConfig(congresId) {
@@ -71,37 +120,348 @@ function pageLayout(title, bodyHtml) {
 <html lang="fr"><head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${escapeHtml(title)}</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500&display=swap" rel="stylesheet">
 <style>
-  * { box-sizing:border-box; }
-  body { margin:0; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;
-         background:#0f172a; color:#e2e8f0; min-height:100vh; padding:24px 16px; }
-  .wrap { max-width:640px; margin:0 auto; }
-  .header { text-align:center; margin-bottom:28px; }
-  .header h1 { font-size:22px; margin:12px 0 4px; background:linear-gradient(90deg,#00e5cc,#6c3fc5,#e040fb);
-               -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent; }
-  .header p { color:#94a3b8; font-size:13px; margin:0; }
-  .badge-open  { display:inline-block; padding:4px 12px; border-radius:20px; font-size:12px; font-weight:600;
-                 background:rgba(16,185,129,.15); color:#34d399; border:1px solid rgba(16,185,129,.3); }
-  .badge-closed{ display:inline-block; padding:4px 12px; border-radius:20px; font-size:12px; font-weight:600;
-                 background:rgba(239,68,68,.15); color:#f87171; border:1px solid rgba(239,68,68,.3); }
-  .card { background:#161f38; border:1px solid rgba(255,255,255,.08); border-radius:16px; padding:22px; margin-bottom:16px; }
-  .card h2 { font-size:14px; margin:0 0 10px; color:#a78bfa; }
-  .card p, .card div.txt { font-size:13.5px; line-height:1.6; color:#cbd5e1; white-space:pre-wrap; margin:0; }
-  label { display:block; font-size:12.5px; color:#94a3b8; margin:14px 0 6px; font-weight:600; }
-  input[type=text], input[type=email], select {
-    width:100%; padding:11px 12px; border-radius:10px; border:1.5px solid rgba(255,255,255,.12);
-    background:#0f172a; color:#e2e8f0; font-size:14px; }
-  input[type=file] { width:100%; padding:10px; border-radius:10px; border:1.5px dashed rgba(255,255,255,.2);
-    background:#0f172a; color:#94a3b8; font-size:13px; }
-  button { width:100%; margin-top:22px; padding:14px; border:none; border-radius:12px; font-size:15px; font-weight:700;
-    color:#fff; background:linear-gradient(90deg,#00e5cc,#6c3fc5); cursor:pointer; }
-  .footer { text-align:center; color:#475569; font-size:11px; margin-top:20px; }
-  .success { text-align:center; padding:50px 20px; }
-  .success .icon { font-size:52px; margin-bottom:14px; }
-  .success h1 { font-size:20px; color:#34d399; margin:0 0 10px; }
-  .success p { color:#94a3b8; font-size:14px; }
+  :root{
+    --bg:#FAFBF9; --surface:#FFFFFF; --ink:#16262B; --ink-soft:#54666C;
+    --primary:#1B4B5A; --primary-dark:#0F323C; --accent:#2E8B74; --accent-soft:#E4F1EC;
+    --warm:#C08A3E; --warm-soft:#F7EEDD; --border:#DFE6E4; --error:#C1443D; --error-soft:#FBEAE8;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font-family:'Inter',-apple-system,sans-serif;background:var(--bg);color:var(--ink);min-height:100vh;padding:24px 0 60px}
+  .wrap{max-width:640px;margin:0 auto;padding:0 16px}
+  .header{background:linear-gradient(160deg,var(--primary) 0%,var(--primary-dark) 100%);color:#fff;
+    padding:28px 22px;border-radius:16px;text-align:center;margin-bottom:24px}
+  .header h1{font-family:'Space Grotesk',sans-serif;font-size:22px;margin:0 0 4px;letter-spacing:-.01em}
+  .header p{color:#C8DAD9;margin:0;font-size:13.5px}
+  .badge-open{display:inline-block;padding:5px 13px;border-radius:100px;font-size:12px;font-weight:600;background:rgba(255,255,255,.15);color:#CFE6DD;border:1px solid rgba(255,255,255,.25);margin-top:10px}
+  .badge-closed{display:inline-block;padding:5px 13px;border-radius:100px;font-size:12px;font-weight:600;background:var(--error-soft);color:var(--error);border:1px solid #F3C9C5}
+  .card{background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:22px;margin-bottom:16px;box-shadow:0 1px 2px rgba(16,38,43,.04),0 8px 24px rgba(16,38,43,.06)}
+  .card h2{font-family:'Space Grotesk',sans-serif;font-size:15px;margin:0 0 10px;color:var(--primary)}
+  .card p, .card div.txt{font-size:13.5px;line-height:1.6;color:var(--ink-soft);white-space:pre-wrap;margin:0}
+  label{display:block;font-size:13px;font-weight:600;color:var(--ink);margin:16px 0 7px}
+  label:first-of-type{margin-top:2px}
+  .req{color:var(--warm);margin-left:2px}
+  .opt-tag{font-family:'IBM Plex Mono',monospace;font-size:10.5px;color:var(--ink-soft);background:#F1F4F3;padding:2px 7px;border-radius:5px;margin-left:6px;font-weight:500}
+  .help{font-size:12px;color:var(--ink-soft);margin-top:6px}
+  input[type=text],input[type=email],input[type=tel],input[type=date],input[type=number],select,textarea{
+    width:100%;padding:11px 13px;border:1.5px solid var(--border);border-radius:9px;
+    font-family:'Inter',sans-serif;font-size:14.5px;color:var(--ink);background:#fff}
+  input:focus,select:focus,textarea:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
+  .radio-row{display:flex;flex-wrap:wrap;gap:9px;margin-top:2px}
+  .radio-row label.opt{
+    flex:1 1 auto;min-width:120px;display:flex;align-items:center;gap:8px;
+    border:1.5px solid var(--border);border-radius:10px;padding:10px 14px;font-size:13.5px;
+    font-weight:500;color:var(--ink-soft);cursor:pointer;background:#fff;margin:0}
+  .radio-row input{width:15px;height:15px;accent-color:var(--accent);flex-shrink:0;margin:0}
+  .radio-row label.opt:has(input:checked){border-color:var(--accent);background:var(--accent-soft);color:var(--ink)}
+  .plan-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:2px}
+  @media(max-width:480px){.plan-grid{grid-template-columns:1fr}}
+  .plan{border:1.5px solid var(--border);border-radius:11px;padding:14px;cursor:pointer;background:#fff}
+  .plan:has(input:checked){border-color:var(--primary);box-shadow:0 0 0 3px var(--accent-soft);background:#F9FCFB}
+  .plan input{margin-right:7px;accent-color:var(--primary)}
+  .plan-name{font-weight:600;font-size:13.5px;color:var(--ink);display:inline}
+  .plan-inc{font-size:12px;color:var(--ink-soft);margin:6px 0 8px;line-height:1.4}
+  .plan-price{font-family:'IBM Plex Mono',monospace;font-size:12.5px;font-weight:600;color:var(--primary)}
+  .conditional{border-left:2.5px solid var(--accent-soft);padding-left:16px;margin-top:16px}
+  .checkbox-line{display:flex;align-items:flex-start;gap:10px;padding:13px 15px;border:1.5px solid var(--border);border-radius:10px;margin-top:14px;background:#fff}
+  .checkbox-line input{margin-top:2px;width:16px;height:16px;accent-color:var(--accent);flex-shrink:0}
+  .checkbox-line span{font-size:13px;color:var(--ink)}
+  .info-box{background:var(--warm-soft);border:1px solid #EAD9B5;border-radius:9px;padding:12px 14px;font-size:12.5px;color:#6B5223;margin-top:10px;line-height:1.5}
+  button{width:100%;margin-top:22px;padding:14px;border:none;border-radius:11px;font-family:'Space Grotesk',sans-serif;
+    font-size:15px;font-weight:600;color:#fff;background:var(--primary);cursor:pointer}
+  button:hover{background:var(--primary-dark)}
+  .footer{text-align:center;color:var(--ink-soft);font-size:11.5px;margin-top:20px}
+  .success{text-align:center;padding:60px 20px 40px}
+  .success .icon{width:56px;height:56px;border-radius:50%;background:var(--accent-soft);color:var(--accent);
+    display:flex;align-items:center;justify-content:center;font-size:26px;margin:0 auto 16px}
+  .success h1{font-family:'Space Grotesk',sans-serif;font-size:20px;color:var(--primary-dark);margin:0 0 10px}
+  .success p{color:var(--ink-soft);font-size:14px;line-height:1.6}
+  .alert{background:var(--error-soft);border:1px solid #F3C9C5;color:var(--error);border-radius:10px;padding:12px 14px;font-size:13px;margin-bottom:14px}
+  .total-box{background:var(--primary-dark);color:#fff;border-radius:12px;padding:16px 18px;margin-top:18px;display:flex;justify-content:space-between;align-items:center}
+  .total-box .label{font-size:12.5px;color:#9FC6BB}
+  .total-box .val{font-family:'IBM Plex Mono',monospace;font-size:19px;font-weight:600;color:#5FD9AE}
 </style></head>
 <body><div class="wrap">${bodyHtml}</div></body></html>`;
+}
+
+// ─── Formulaire d'inscription public — 58 wilayas d'Algérie ──────────────
+const WILAYAS = [
+  "01 - Adrar","02 - Chlef","03 - Laghouat","04 - Oum El Bouaghi","05 - Batna","06 - Béjaïa",
+  "07 - Biskra","08 - Béchar","09 - Blida","10 - Bouira","11 - Tamanrasset","12 - Tébessa",
+  "13 - Tlemcen","14 - Tiaret","15 - Tizi Ouzou","16 - Alger","17 - Djelfa","18 - Jijel",
+  "19 - Sétif","20 - Saïda","21 - Skikda","22 - Sidi Bel Abbès","23 - Annaba","24 - Guelma",
+  "25 - Constantine","26 - Médéa","27 - Mostaganem","28 - M'Sila","29 - Mascara","30 - Ouargla",
+  "31 - Oran","32 - El Bayadh","33 - Illizi","34 - Bordj Bou Arréridj","35 - Boumerdès",
+  "36 - El Tarf","37 - Tindouf","38 - Tissemsilt","39 - El Oued","40 - Khenchela",
+  "41 - Souk Ahras","42 - Tipaza","43 - Mila","44 - Aïn Defla","45 - Naâma","46 - Aïn Témouchent",
+  "47 - Ghardaïa","48 - Relizane","49 - Timimoun","50 - Bordj Badji Mokhtar","51 - Ouled Djellal",
+  "52 - Béni Abbès","53 - In Salah","54 - In Guezzam","55 - Touggourt","56 - Djanet",
+  "57 - El M'Ghair","58 - El Meniaa"
+];
+
+// Construit le HTML du formulaire public d'inscription (21 champs).
+// tarifsValides : lignes de `tarifs_publics` publiées par l'organisateur pour ce congrès.
+// Les libellés contenant "accompagnateur" sont proposés comme formule accompagnateur ;
+// les autres comme formule participant.
+function buildInscriptionFormHtml(congresNom, config, tarifsValides, congresId) {
+  const fmtMontant = (m, d) => `${Number(m).toLocaleString('fr-FR')} ${d || 'DZD'}`;
+  const formulesParticipant = tarifsValides.filter(t => !/accompagnateur/i.test(t.libelle));
+  const formulesAccomp = tarifsValides.filter(t => /accompagnateur/i.test(t.libelle));
+
+  return `
+    <div class="header">
+      <h1>${escapeHtml(congresNom)}</h1>
+      <p>Inscription des participants</p>
+      <div><span class="badge-open">🟢 Inscriptions ouvertes</span></div>
+    </div>
+
+    ${config.message_bienvenue ? `<div class="card"><div class="txt">${escapeHtml(config.message_bienvenue)}</div></div>` : ''}
+    ${config.date_limite ? `<div class="card"><h2>⏰ Date limite d'inscription</h2><div class="txt">${escapeHtml(config.date_limite)}</div></div>` : ''}
+
+    <form method="POST" action="/inscription/${congresId}" id="fInscription">
+
+      <div class="card">
+        <h2>👤 Identité</h2>
+        <label>Nom<span class="req">*</span></label>
+        <input type="text" name="nom" required maxlength="100">
+        <label>Prénom<span class="req">*</span></label>
+        <input type="text" name="prenom" required maxlength="100">
+
+        <label>Sexe<span class="req">*</span></label>
+        <div class="radio-row">
+          <label class="opt"><input type="radio" name="sexe" value="Masculin" required> Masculin</label>
+          <label class="opt"><input type="radio" name="sexe" value="Féminin"> Féminin</label>
+        </div>
+
+        <label>Date de naissance<span class="req">*</span></label>
+        <input type="date" name="date_naissance" required style="max-width:220px">
+      </div>
+
+      <div class="card">
+        <h2>📞 Contact &amp; exercice</h2>
+        <label>Numéro de téléphone<span class="req">*</span></label>
+        <input type="tel" name="telephone" required maxlength="20" placeholder="05XX XX XX XX">
+        <label>Adresse email<span class="req">*</span></label>
+        <input type="email" name="email" required maxlength="200">
+        <label>Wilaya d'exercice<span class="req">*</span></label>
+        <select name="wilaya" required>
+          <option value="" disabled selected>Sélectionnez votre wilaya</option>
+          ${WILAYAS.map(w => `<option value="${w}">${w}</option>`).join('')}
+        </select>
+      </div>
+
+      <div class="card">
+        <h2>🩺 Spécialité</h2>
+        <label>Spécialité<span class="req">*</span></label>
+        <div class="radio-row" style="flex-direction:column">
+          <label class="opt"><input type="radio" name="specialite" value="Médecin généraliste" required> Médecin généraliste</label>
+          <label class="opt"><input type="radio" name="specialite" value="Médecin spécialiste" id="rb-specialiste"> Médecin spécialiste</label>
+          <label class="opt"><input type="radio" name="specialite" value="Interne"> Interne</label>
+          <label class="opt"><input type="radio" name="specialite" value="Résident"> Résident</label>
+          <label class="opt"><input type="radio" name="specialite" value="Autre"> Autre : <input type="text" name="specialite_autre" placeholder="précisez" style="width:140px;padding:6px 9px;font-size:12.5px;margin-left:6px"></label>
+        </div>
+        <div id="wrap-precision" style="display:none">
+          <label>Si spécialiste, précisez votre spécialité<span class="opt-tag">optionnel</span></label>
+          <input type="text" name="precision_specialite" maxlength="150" placeholder="ex : cardiologie, pédiatrie…">
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>🎫 Choix de la formule</h2>
+        ${formulesParticipant.length ? `
+        <div class="plan-grid">
+          ${formulesParticipant.map((t, i) => `
+            <label class="plan">
+              <input type="radio" name="formule" value="${escapeHtml(t.libelle)}" data-price="${t.montant}" ${i===0?'required':''}>
+              <span class="plan-name">${escapeHtml(t.libelle)}</span>
+              <div class="plan-inc">${escapeHtml(t.type_participant || '')}</div>
+              <div class="plan-price">${fmtMontant(t.montant, t.devise)}</div>
+            </label>
+          `).join('')}
+        </div>` : `
+        <p style="font-size:13px;color:var(--ink-soft)">Les formules et tarifs n'ont pas encore été configurés par l'organisation. Contactez l'organisation pour plus d'informations.</p>
+        <input type="hidden" name="formule" value="À définir">
+        `}
+      </div>
+
+      <div class="card">
+        <h2>➕ Accompagnateur</h2>
+        <label>Avez-vous un accompagnateur ?<span class="req">*</span></label>
+        <div class="radio-row">
+          <label class="opt"><input type="radio" name="accompagnateur" value="Oui" id="rb-accomp-oui" required> Oui</label>
+          <label class="opt"><input type="radio" name="accompagnateur" value="Non"> Non</label>
+        </div>
+        <div class="conditional" id="wrap-accomp" style="display:none">
+          <label>Nom et prénom de l'accompagnateur</label>
+          <input type="text" name="accomp_nom" maxlength="150">
+          <label>Sexe de l'accompagnateur</label>
+          <div class="radio-row">
+            <label class="opt"><input type="radio" name="accomp_sexe" value="Masculin"> Masculin</label>
+            <label class="opt"><input type="radio" name="accomp_sexe" value="Féminin"> Féminin</label>
+          </div>
+          <label>Lien avec l'accompagnateur</label>
+          <div class="radio-row" style="flex-direction:column">
+            <label class="opt"><input type="radio" name="accomp_lien" value="Conjoint(e)"> Conjoint(e)</label>
+            <label class="opt"><input type="radio" name="accomp_lien" value="Enfant"> Enfant</label>
+            <label class="opt"><input type="radio" name="accomp_lien" value="Parent"> Parent</label>
+            <label class="opt"><input type="radio" name="accomp_lien" value="Autre"> Autre : <input type="text" name="accomp_lien_autre" placeholder="précisez" style="width:140px;padding:6px 9px;font-size:12.5px;margin-left:6px"></label>
+          </div>
+          ${formulesAccomp.length ? `
+          <label>Formule accompagnateur</label>
+          ${formulesAccomp.map(t => `
+            <label class="plan" style="display:block;max-width:320px">
+              <input type="checkbox" name="accomp_formule" value="${escapeHtml(t.libelle)}" data-price="${t.montant}">
+              <span class="plan-name">${escapeHtml(t.libelle)}</span>
+              <div class="plan-price">${fmtMontant(t.montant, t.devise)}</div>
+            </label>
+          `).join('')}
+          ` : ''}
+          <div class="info-box">L'accompagnateur n'a pas accès aux séances scientifiques du congrès.</div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>🛏️ Hébergement</h2>
+        <label>Souhaitez-vous partager votre chambre avec un(e) confrère / consœur en particulier ?<span class="req">*</span></label>
+        <div class="radio-row">
+          <label class="opt"><input type="radio" name="partage_chambre" value="Oui" id="rb-partage-oui" required> Oui</label>
+          <label class="opt"><input type="radio" name="partage_chambre" value="Non"> Non</label>
+        </div>
+        <div class="conditional" id="wrap-partage" style="display:none">
+          <label>Nom et prénom du compagnon / de la compagne de chambre</label>
+          <input type="text" name="compagnon_chambre" maxlength="150">
+          <div class="help">Les deux participants doivent impérativement indiquer le nom de l'autre sur leur formulaire respectif.</div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>💳 Paiement</h2>
+        <div id="total-recap" class="total-box" style="display:none">
+          <span class="label">Montant total à régler</span>
+          <span class="val" id="total-val">—</span>
+        </div>
+        <input type="hidden" name="montant_total" id="montant_total_input" value="">
+
+        <label>Avez-vous effectué votre virement bancaire ?<span class="req">*</span></label>
+        <div class="radio-row" style="flex-direction:column">
+          <label class="opt"><input type="radio" name="virement_effectue" value="Oui" required> Oui — j'enverrai le justificatif${config.contact_email ? ` à ${escapeHtml(config.contact_email)}` : ''}</label>
+          <label class="opt"><input type="radio" name="virement_effectue" value="Non"> Non — je m'engage à effectuer le virement dans un délai de 10 jours</label>
+        </div>
+
+        <label class="checkbox-line" style="cursor:pointer">
+          <input type="checkbox" name="accept_conditions" required>
+          <span>J'ai pris connaissance des conditions d'inscription, de paiement et d'hébergement. Oui, j'accepte<span class="req">*</span></span>
+        </label>
+        <label class="checkbox-line" style="cursor:pointer">
+          <input type="checkbox" name="accept_certif" required>
+          <span>Je certifie que les informations fournies sont exactes. Oui, je confirme<span class="req">*</span></span>
+        </label>
+      </div>
+
+      <button type="submit">M'inscrire</button>
+    </form>
+    <div class="footer">${config.contact_email ? 'Contact : ' + escapeHtml(config.contact_email) : ''}</div>
+
+    <script>
+      document.querySelectorAll('input[name="specialite"]').forEach(function(r){
+        r.addEventListener('change', function(){
+          document.getElementById('wrap-precision').style.display =
+            (document.getElementById('rb-specialiste').checked) ? 'block' : 'none';
+        });
+      });
+      document.querySelectorAll('input[name="accompagnateur"]').forEach(function(r){
+        r.addEventListener('change', function(){
+          document.getElementById('wrap-accomp').style.display =
+            (document.getElementById('rb-accomp-oui').checked) ? 'block' : 'none';
+          updateTotal();
+        });
+      });
+      document.querySelectorAll('input[name="partage_chambre"]').forEach(function(r){
+        r.addEventListener('change', function(){
+          document.getElementById('wrap-partage').style.display =
+            (document.getElementById('rb-partage-oui').checked) ? 'block' : 'none';
+        });
+      });
+      function updateTotal(){
+        var total = 0, any = false;
+        var formule = document.querySelector('input[name="formule"]:checked');
+        if (formule && formule.dataset.price) { total += parseFloat(formule.dataset.price) || 0; any = true; }
+        if (document.getElementById('rb-accomp-oui') && document.getElementById('rb-accomp-oui').checked) {
+          document.querySelectorAll('input[name="accomp_formule"]:checked').forEach(function(c){
+            total += parseFloat(c.dataset.price) || 0; any = true;
+          });
+        }
+        var box = document.getElementById('total-recap');
+        var val = document.getElementById('total-val');
+        document.getElementById('montant_total_input').value = any ? total : '';
+        if (any) { box.style.display = 'flex'; val.textContent = total.toLocaleString('fr-FR') + ' DZD'; }
+        else { box.style.display = 'none'; }
+      }
+      document.querySelectorAll('input[name="formule"], input[name="accomp_formule"]').forEach(function(el){
+        el.addEventListener('change', updateTotal);
+      });
+      updateTotal();
+    </script>
+  `;
+}
+
+// Valide et extrait les données du formulaire d'inscription public.
+// Retourne { data } si tout est valide, ou { error: { title, message } } sinon.
+function validateAndExtractInscription(body) {
+  const {
+    prenom, nom, sexe, date_naissance, email, telephone, wilaya,
+    specialite, specialite_autre, precision_specialite,
+    formule, accompagnateur, accomp_nom, accomp_sexe, accomp_lien, accomp_lien_autre,
+    partage_chambre, compagnon_chambre, montant_total, virement_effectue,
+    accept_conditions, accept_certif
+  } = body;
+  let accomp_formule = body.accomp_formule;
+  if (Array.isArray(accomp_formule)) accomp_formule = accomp_formule.join(', ');
+
+  if (!prenom || !nom || !email || !sexe || !date_naissance || !telephone || !wilaya || !specialite) {
+    return { error: { title: 'Champs manquants', message: "Merci de compléter tous les champs obligatoires (identité, contact, spécialité) avant de soumettre le formulaire." } };
+  }
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    return { error: { title: 'Email invalide', message: 'Veuillez saisir une adresse email valide.' } };
+  }
+  if (prenom.length > 100 || nom.length > 100) {
+    return { error: { title: 'Champ trop long', message: 'Le prénom et le nom sont limités à 100 caractères.' } };
+  }
+  if (!formule) {
+    return { error: { title: 'Formule manquante', message: 'Merci de choisir une formule de participation.' } };
+  }
+  if (!accompagnateur) {
+    return { error: { title: 'Champ manquant', message: "Merci d'indiquer si vous avez un accompagnateur." } };
+  }
+  if (!partage_chambre) {
+    return { error: { title: 'Champ manquant', message: 'Merci d\'indiquer si vous souhaitez partager votre chambre.' } };
+  }
+  if (!virement_effectue) {
+    return { error: { title: 'Champ manquant', message: 'Merci d\'indiquer si vous avez effectué votre virement bancaire.' } };
+  }
+  if (!accept_conditions || !accept_certif) {
+    return { error: { title: 'Conditions non acceptées', message: "Vous devez accepter les conditions d'inscription et certifier l'exactitude des informations pour continuer." } };
+  }
+
+  const specialiteFinale = specialite === 'Autre' && specialite_autre ? `Autre : ${specialite_autre}` : specialite;
+  const accompLienFinal = accomp_lien === 'Autre' && accomp_lien_autre ? `Autre : ${accomp_lien_autre}` : (accomp_lien || '');
+
+  return {
+    data: {
+      prenom, nom, sexe, date_naissance, email, telephone: telephone || '', wilaya,
+      specialite: specialiteFinale, precision_specialite: precision_specialite || '',
+      formule, accompagnateur,
+      accomp_nom: accompagnateur === 'Oui' ? (accomp_nom || '') : '',
+      accomp_sexe: accompagnateur === 'Oui' ? (accomp_sexe || '') : '',
+      accomp_lien: accompagnateur === 'Oui' ? accompLienFinal : '',
+      accomp_formule: accompagnateur === 'Oui' ? (accomp_formule || '') : '',
+      partage_chambre, compagnon_chambre: partage_chambre === 'Oui' ? (compagnon_chambre || '') : '',
+      montant_total: montant_total ? parseFloat(montant_total) || null : null,
+      virement_effectue
+    }
+  };
 }
 
 const app = express();
@@ -320,38 +680,7 @@ app.get('/inscription/:congresId', async (req, res) => {
         <div class="card" style="text-align:center"><span class="badge-closed">🔴 Inscriptions fermées</span></div>`));
     }
     const tarifs = await getTarifsPublics(congresId);
-    const fmtMontant = (m, d) => `${Number(m).toLocaleString('fr-FR')} ${d || 'DZD'}`;
-
-    res.send(pageLayout(config.congres_nom, `
-      <div class="header">
-        <h1>${escapeHtml(config.congres_nom)}</h1><p>Inscription des participants</p>
-        <div style="margin-top:8px"><span class="badge-open">🟢 Inscriptions ouvertes</span></div>
-      </div>
-      ${config.message_bienvenue ? `<div class="card"><div class="txt">${escapeHtml(config.message_bienvenue)}</div></div>` : ''}
-      ${config.date_limite ? `<div class="card"><h2>⏰ Date limite</h2><div class="txt">${escapeHtml(config.date_limite)}</div></div>` : ''}
-      ${tarifs.length ? `<div class="card"><h2>💶 Tarifs</h2><div class="txt">${tarifs.map(t => `${escapeHtml(t.libelle)} (${escapeHtml(t.type_participant)}) — <strong>${fmtMontant(t.montant, t.devise)}</strong>`).join('<br>')}</div></div>` : ''}
-      <div class="card">
-        <h2>📝 S'inscrire au congrès</h2>
-        <form method="POST" action="/inscription/${congresId}">
-          <label>Prénom *</label><input type="text" name="prenom" required maxlength="100">
-          <label>Nom *</label><input type="text" name="nom" required maxlength="100">
-          <label>Email *</label><input type="email" name="email" required maxlength="200">
-          <label>Téléphone</label><input type="text" name="telephone" maxlength="20">
-          <label>Institution / Organisme</label><input type="text" name="institution" maxlength="200">
-          <label>Spécialité</label><input type="text" name="specialite" maxlength="150">
-          <label>Type de participation</label>
-          <select name="type_participant">
-            <option value="participant">Participant</option>
-            <option value="intervenant">Intervenant</option>
-            <option value="presse">Presse</option>
-          </select>
-          ${tarifs.length ? `<label>Tarif</label><select name="categorie"><option value="">-- Aucun --</option>${tarifs.map(t => `<option value="${escapeHtml(t.libelle)}">${escapeHtml(t.libelle)} — ${fmtMontant(t.montant, t.devise)}</option>`).join('')}</select>` : ''}
-          <label>Régime alimentaire particulier</label><input type="text" name="regime_alimentaire" maxlength="150">
-          <button type="submit">M'inscrire</button>
-        </form>
-      </div>
-      <div class="footer">${config.contact_email ? 'Contact : ' + escapeHtml(config.contact_email) : ''}</div>
-    `));
+    res.send(pageLayout(config.congres_nom, buildInscriptionFormHtml(config.congres_nom, config, tarifs, congresId)));
   } catch (e) {
     console.error('[GET /inscription]', e.message);
     res.status(500).send(pageLayout('Erreur', `<div class="success"><div class="icon">❌</div><h1>Erreur serveur</h1></div>`));
@@ -364,28 +693,28 @@ app.post('/inscription/:congresId', inscriptionLimiter, express.urlencoded({ ext
     const config = await getInscriptionConfig(congresId);
     if (!config) return res.status(404).send(pageLayout('Introuvable', `<div class="success"><div class="icon">🔍</div><h1>Congrès introuvable</h1></div>`));
 
-    const { prenom, nom, email, telephone, institution, specialite, type_participant, categorie, regime_alimentaire } = req.body;
-    if (!prenom || !nom || !email) {
-      return res.status(400).send(pageLayout('Erreur', `<div class="success"><div class="icon">⚠️</div><h1>Champs manquants</h1><p>Prénom, nom et email sont obligatoires.</p></div>`));
+    const result = validateAndExtractInscription(req.body);
+    if (result.error) {
+      return res.status(400).send(pageLayout('Erreur', `<div class="success"><div class="icon">⚠️</div><h1>${escapeHtml(result.error.title)}</h1><p>${escapeHtml(result.error.message)}</p></div>`));
     }
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-      return res.status(400).send(pageLayout('Erreur', `<div class="success"><div class="icon">⚠️</div><h1>Email invalide</h1></div>`));
-    }
-    if (prenom.length > 100 || nom.length > 100) {
-      return res.status(400).send(pageLayout('Erreur', `<div class="success"><div class="icon">⚠️</div><h1>Champ trop long</h1></div>`));
-    }
-    const typeOk = ['participant', 'intervenant', 'presse'].includes(type_participant) ? type_participant : 'participant';
+    const d = result.data;
 
     await insertInscription({
-      congres_id: congresId, prenom, nom, email, telephone: telephone || '', institution: institution || '',
-      specialite: specialite || '', type_participant: typeOk, categorie: categorie || '',
-      regime_alimentaire: regime_alimentaire || '', synced: false
+      congres_id: congresId, prenom: d.prenom, nom: d.nom, sexe: d.sexe, date_naissance: d.date_naissance,
+      email: d.email, telephone: d.telephone, wilaya: d.wilaya, specialite: d.specialite,
+      precision_specialite: d.precision_specialite, formule: d.formule, accompagnateur: d.accompagnateur,
+      accomp_nom: d.accomp_nom, accomp_sexe: d.accomp_sexe, accomp_lien: d.accomp_lien, accomp_formule: d.accomp_formule,
+      partage_chambre: d.partage_chambre, compagnon_chambre: d.compagnon_chambre, montant_total: d.montant_total,
+      virement_effectue: d.virement_effectue, synced: false
     });
+
+    envoyerEmailConfirmationInscription(d.email, d, config.congres_nom); // best-effort, ne bloque pas la réponse
 
     res.send(pageLayout('Merci', `
       <div class="success"><div class="icon">✅</div><h1>Inscription reçue !</h1>
-      <p>Merci <strong>${escapeHtml(prenom)} ${escapeHtml(nom)}</strong>, votre inscription à <strong>${escapeHtml(config.congres_nom)}</strong>
-      a bien été enregistrée. Elle sera confirmée prochainement.</p></div>
+      <p>Merci <strong>${escapeHtml(d.prenom)} ${escapeHtml(d.nom)}</strong>, votre inscription à <strong>${escapeHtml(config.congres_nom)}</strong>
+      a bien été enregistrée. Elle sera confirmée prochainement.
+      ${d.virement_effectue === 'Oui' ? '<br><br>N\'oubliez pas d\'envoyer votre justificatif de virement à l\'adresse de contact indiquée sur la page du congrès.' : '<br><br>Merci d\'effectuer votre virement dans les 10 jours suivant cette inscription.'}</p></div>
     `));
   } catch (e) {
     console.error('[POST /inscription]', e.message);

@@ -86,16 +86,42 @@ create table if not exists inscriptions_recues (
   congres_id integer not null,
   prenom text not null,
   nom text not null,
+  sexe text,
+  date_naissance text,
   email text not null,
   telephone text,
-  institution text,
+  wilaya text,
   specialite text,
-  type_participant text default 'participant',
-  categorie text,
-  regime_alimentaire text,
+  precision_specialite text,
+  formule text,
+  accompagnateur text,
+  accomp_nom text,
+  accomp_sexe text,
+  accomp_lien text,
+  accomp_formule text,
+  partage_chambre text,
+  compagnon_chambre text,
+  montant_total numeric,
+  virement_effectue text,
   synced boolean default false,
   created_at timestamptz default now()
 );
+
+-- Si la table inscriptions_recues existe déjà (déploiement antérieur), exécutez plutôt :
+-- alter table inscriptions_recues add column if not exists sexe text;
+-- alter table inscriptions_recues add column if not exists date_naissance text;
+-- alter table inscriptions_recues add column if not exists wilaya text;
+-- alter table inscriptions_recues add column if not exists precision_specialite text;
+-- alter table inscriptions_recues add column if not exists formule text;
+-- alter table inscriptions_recues add column if not exists accompagnateur text;
+-- alter table inscriptions_recues add column if not exists accomp_nom text;
+-- alter table inscriptions_recues add column if not exists accomp_sexe text;
+-- alter table inscriptions_recues add column if not exists accomp_lien text;
+-- alter table inscriptions_recues add column if not exists accomp_formule text;
+-- alter table inscriptions_recues add column if not exists partage_chambre text;
+-- alter table inscriptions_recues add column if not exists compagnon_chambre text;
+-- alter table inscriptions_recues add column if not exists montant_total numeric;
+-- alter table inscriptions_recues add column if not exists virement_effectue text;
 
 -- ═══════════ Espace partenaires ═══════════
 create table if not exists partenaires_config (
@@ -169,6 +195,17 @@ des partenaires (dans des sous-dossiers séparés, pas de conflit).
    | `SUPABASE_URL` | L'URL de ton projet Supabase (ex: `https://xxxxx.supabase.co`) |
    | `SUPABASE_SERVICE_KEY` | La clé **service_role** de ton projet Supabase (⚠️ pas la clé `anon`) |
    | `SUPABASE_STORAGE_BUCKET` | `communications-appel` (ou le nom choisi à l'étape 1) |
+   | `SMTP_HOST` | *(optionnel)* Serveur SMTP pour l'email de confirmation d'inscription, ex: `smtp.gmail.com` |
+   | `SMTP_PORT` | *(optionnel)* Port SMTP, ex: `587` |
+   | `SMTP_USER` | *(optionnel)* Adresse email d'envoi |
+   | `SMTP_PASS` | *(optionnel)* Mot de passe (ou mot de passe d'application Gmail) |
+   | `SMTP_FROM` | *(optionnel)* Adresse d'expédition affichée — reprend `SMTP_USER` si absent |
+
+   Les 5 variables SMTP sont indépendantes de celles configurées dans l'appli desktop
+   (Paramètres → Envoi d'emails automatiques) : ce serveur cloud tourne à part, sur Render,
+   il a donc besoin de sa propre configuration. Si elles sont absentes, le serveur cloud
+   fonctionne normalement — les inscriptions sont enregistrées, simplement sans email
+   automatique.
 6. Clique sur **Create Web Service**. Après quelques minutes, Render te donne une adresse
    du type `https://nutri-cloud.onrender.com`.
 
