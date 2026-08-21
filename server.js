@@ -206,9 +206,14 @@ const WILAYAS = [
 // Les libellés contenant "accompagnateur" sont proposés comme formule accompagnateur ;
 // les autres comme formule participant.
 function buildInscriptionFormHtml(congresNom, config, tarifsValides, congresId) {
-  const fmtMontant = (m, d) => `${Number(m).toLocaleString('fr-FR')} ${d || 'DZD'}`;
-  const formulesParticipant = tarifsValides.filter(t => !/accompagnateur/i.test(t.libelle));
-  const formulesAccomp = tarifsValides.filter(t => /accompagnateur/i.test(t.libelle));
+  // Formules à tarifs fixes (définies par l'organisation — plus besoin de configurer
+  // le module Tarifs pour ce formulaire).
+  const FORMULES = [
+    { libelle: 'Congrès seul', inc: 'Accès aux séances scientifiques', prix: 1500 },
+    { libelle: 'Tout compris', inc: 'Congrès + hébergement', prix: 4500 },
+    { libelle: 'Étudiant', inc: 'Carte étudiante obligatoire', prix: 0, gratuit: true },
+  ];
+  const fmtMontant = (m) => m === 0 ? 'Gratuit' : `${Number(m).toLocaleString('fr-FR')} DA`;
 
   return `
     <div class="header">
@@ -250,6 +255,8 @@ function buildInscriptionFormHtml(congresNom, config, tarifsValides, congresId) 
           <option value="" disabled selected>Sélectionnez votre wilaya</option>
           ${WILAYAS.map(w => `<option value="${w}">${w}</option>`).join('')}
         </select>
+        <label>Lieu d'exercice<span class="req">*</span></label>
+        <input type="text" name="lieu_exercice" required maxlength="200" placeholder="précisez votre ville / commune / établissement">
       </div>
 
       <div class="card">
@@ -260,6 +267,7 @@ function buildInscriptionFormHtml(congresNom, config, tarifsValides, congresId) 
           <label class="opt"><input type="radio" name="specialite" value="Médecin spécialiste" id="rb-specialiste"> Médecin spécialiste</label>
           <label class="opt"><input type="radio" name="specialite" value="Interne"> Interne</label>
           <label class="opt"><input type="radio" name="specialite" value="Résident"> Résident</label>
+          <label class="opt"><input type="radio" name="specialite" value="Étudiant en médecine"> Étudiant en médecine</label>
           <label class="opt"><input type="radio" name="specialite" value="Autre"> Autre : <input type="text" name="specialite_autre" placeholder="précisez" style="width:140px;padding:6px 9px;font-size:12.5px;margin-left:6px"></label>
         </div>
         <div id="wrap-precision" style="display:none">
@@ -270,55 +278,15 @@ function buildInscriptionFormHtml(congresNom, config, tarifsValides, congresId) 
 
       <div class="card">
         <h2>🎫 Choix de la formule</h2>
-        ${formulesParticipant.length ? `
         <div class="plan-grid">
-          ${formulesParticipant.map((t, i) => `
+          ${FORMULES.map((f, i) => `
             <label class="plan">
-              <input type="radio" name="formule" value="${escapeHtml(t.libelle)}" data-price="${t.montant}" ${i===0?'required':''}>
-              <span class="plan-name">${escapeHtml(t.libelle)}</span>
-              <div class="plan-inc">${escapeHtml(t.type_participant || '')}</div>
-              <div class="plan-price">${fmtMontant(t.montant, t.devise)}</div>
+              <input type="radio" name="formule" value="${escapeHtml(f.libelle)}" data-price="${f.prix}" ${i===0?'required':''}>
+              <span class="plan-name">${escapeHtml(f.libelle)}</span>
+              <div class="plan-inc">${escapeHtml(f.inc)}</div>
+              <div class="plan-price">${fmtMontant(f.prix)}</div>
             </label>
           `).join('')}
-        </div>` : `
-        <p style="font-size:13px;color:var(--ink-soft)">Les formules et tarifs n'ont pas encore été configurés par l'organisation. Contactez l'organisation pour plus d'informations.</p>
-        <input type="hidden" name="formule" value="À définir">
-        `}
-      </div>
-
-      <div class="card">
-        <h2>➕ Accompagnateur</h2>
-        <label>Avez-vous un accompagnateur ?<span class="req">*</span></label>
-        <div class="radio-row">
-          <label class="opt"><input type="radio" name="accompagnateur" value="Oui" id="rb-accomp-oui" required> Oui</label>
-          <label class="opt"><input type="radio" name="accompagnateur" value="Non"> Non</label>
-        </div>
-        <div class="conditional" id="wrap-accomp" style="display:none">
-          <label>Nom et prénom de l'accompagnateur</label>
-          <input type="text" name="accomp_nom" maxlength="150">
-          <label>Sexe de l'accompagnateur</label>
-          <div class="radio-row">
-            <label class="opt"><input type="radio" name="accomp_sexe" value="Masculin"> Masculin</label>
-            <label class="opt"><input type="radio" name="accomp_sexe" value="Féminin"> Féminin</label>
-          </div>
-          <label>Lien avec l'accompagnateur</label>
-          <div class="radio-row" style="flex-direction:column">
-            <label class="opt"><input type="radio" name="accomp_lien" value="Conjoint(e)"> Conjoint(e)</label>
-            <label class="opt"><input type="radio" name="accomp_lien" value="Enfant"> Enfant</label>
-            <label class="opt"><input type="radio" name="accomp_lien" value="Parent"> Parent</label>
-            <label class="opt"><input type="radio" name="accomp_lien" value="Autre"> Autre : <input type="text" name="accomp_lien_autre" placeholder="précisez" style="width:140px;padding:6px 9px;font-size:12.5px;margin-left:6px"></label>
-          </div>
-          ${formulesAccomp.length ? `
-          <label>Formule accompagnateur</label>
-          ${formulesAccomp.map(t => `
-            <label class="plan" style="display:block;max-width:320px">
-              <input type="checkbox" name="accomp_formule" value="${escapeHtml(t.libelle)}" data-price="${t.montant}">
-              <span class="plan-name">${escapeHtml(t.libelle)}</span>
-              <div class="plan-price">${fmtMontant(t.montant, t.devise)}</div>
-            </label>
-          `).join('')}
-          ` : ''}
-          <div class="info-box">L'accompagnateur n'a pas accès aux séances scientifiques du congrès.</div>
         </div>
       </div>
 
@@ -327,13 +295,14 @@ function buildInscriptionFormHtml(congresNom, config, tarifsValides, congresId) 
         <label>Souhaitez-vous partager votre chambre avec un(e) confrère / consœur en particulier ?<span class="req">*</span></label>
         <div class="radio-row">
           <label class="opt"><input type="radio" name="partage_chambre" value="Oui" id="rb-partage-oui" required> Oui</label>
-          <label class="opt"><input type="radio" name="partage_chambre" value="Non"> Non</label>
+          <label class="opt"><input type="radio" name="partage_chambre" value="Non" id="rb-partage-non"> Non</label>
         </div>
         <div class="conditional" id="wrap-partage" style="display:none">
           <label>Nom et prénom du compagnon / de la compagne de chambre</label>
           <input type="text" name="compagnon_chambre" maxlength="150">
-          <div class="help">Les deux participants doivent impérativement indiquer le nom de l'autre sur leur formulaire respectif.</div>
+          <div class="help">Les deux participants doivent impérativement indiquer le nom de l'autre sur leur formulaire respectif pour que la demande soit validée.</div>
         </div>
+        <div class="info-box" id="wrap-partage-non" style="display:none">Veuillez noter qu'en l'absence de préférence exprimée, les organisateurs se réservent le droit d'attribuer un(e) compagnon / compagne de chambre selon les disponibilités et les profils des participants. Aucune réclamation ne pourra être formulée à ce titre.</div>
       </div>
 
       <div class="card">
@@ -352,11 +321,26 @@ function buildInscriptionFormHtml(congresNom, config, tarifsValides, congresId) 
 
         <label class="checkbox-line" style="cursor:pointer">
           <input type="checkbox" name="accept_conditions" required>
-          <span>J'ai pris connaissance des conditions d'inscription, de paiement et d'hébergement. Oui, j'accepte<span class="req">*</span></span>
+          <span>J'ai pris connaissance des conditions d'inscription, de paiement, d'hébergement et d'annulation. Oui, j'accepte<span class="req">*</span></span>
         </label>
         <label class="checkbox-line" style="cursor:pointer">
           <input type="checkbox" name="accept_certif" required>
           <span>Je certifie que les informations fournies sont exactes. Oui, je confirme<span class="req">*</span></span>
+        </label>
+      </div>
+
+      <div class="card">
+        <h2>🔒 Protection des données personnelles</h2>
+        <p style="font-size:13px;color:var(--ink-soft);line-height:1.6;margin:0 0 12px">
+          Les informations collectées dans ce formulaire sont utilisées exclusivement dans le cadre de l'organisation
+          du <strong>${escapeHtml(congresNom)}</strong> et ne seront en aucun cas transmises à des tiers sans votre consentement.
+          Conformément à la législation en vigueur, vous disposez d'un droit d'accès, de rectification et de suppression
+          de vos données personnelles en envoyant votre demande à ${config.contact_email ? escapeHtml(config.contact_email) : "l'adresse de contact de l'organisation"}.
+          En soumettant ce formulaire, vous acceptez que vos données soient traitées dans le cadre strict de cet événement.
+        </p>
+        <label class="checkbox-line" style="cursor:pointer">
+          <input type="checkbox" name="accept_rgpd" required>
+          <span>J'ai lu et j'accepte la politique de protection des données personnelles<span class="req">*</span></span>
         </label>
       </div>
 
@@ -371,35 +355,25 @@ function buildInscriptionFormHtml(congresNom, config, tarifsValides, congresId) 
             (document.getElementById('rb-specialiste').checked) ? 'block' : 'none';
         });
       });
-      document.querySelectorAll('input[name="accompagnateur"]').forEach(function(r){
-        r.addEventListener('change', function(){
-          document.getElementById('wrap-accomp').style.display =
-            (document.getElementById('rb-accomp-oui').checked) ? 'block' : 'none';
-          updateTotal();
-        });
-      });
       document.querySelectorAll('input[name="partage_chambre"]').forEach(function(r){
         r.addEventListener('change', function(){
           document.getElementById('wrap-partage').style.display =
             (document.getElementById('rb-partage-oui').checked) ? 'block' : 'none';
+          document.getElementById('wrap-partage-non').style.display =
+            (document.getElementById('rb-partage-non').checked) ? 'block' : 'none';
         });
       });
       function updateTotal(){
         var total = 0, any = false;
         var formule = document.querySelector('input[name="formule"]:checked');
         if (formule && formule.dataset.price) { total += parseFloat(formule.dataset.price) || 0; any = true; }
-        if (document.getElementById('rb-accomp-oui') && document.getElementById('rb-accomp-oui').checked) {
-          document.querySelectorAll('input[name="accomp_formule"]:checked').forEach(function(c){
-            total += parseFloat(c.dataset.price) || 0; any = true;
-          });
-        }
         var box = document.getElementById('total-recap');
         var val = document.getElementById('total-val');
         document.getElementById('montant_total_input').value = any ? total : '';
-        if (any) { box.style.display = 'flex'; val.textContent = total.toLocaleString('fr-FR') + ' DZD'; }
+        if (any) { box.style.display = 'flex'; val.textContent = total.toLocaleString('fr-FR') + ' DA'; }
         else { box.style.display = 'none'; }
       }
-      document.querySelectorAll('input[name="formule"], input[name="accomp_formule"]').forEach(function(el){
+      document.querySelectorAll('input[name="formule"]').forEach(function(el){
         el.addEventListener('change', updateTotal);
       });
       updateTotal();
@@ -411,16 +385,13 @@ function buildInscriptionFormHtml(congresNom, config, tarifsValides, congresId) 
 // Retourne { data } si tout est valide, ou { error: { title, message } } sinon.
 function validateAndExtractInscription(body) {
   const {
-    prenom, nom, sexe, date_naissance, email, telephone, wilaya,
+    prenom, nom, sexe, date_naissance, email, telephone, wilaya, lieu_exercice,
     specialite, specialite_autre, precision_specialite,
-    formule, accompagnateur, accomp_nom, accomp_sexe, accomp_lien, accomp_lien_autre,
-    partage_chambre, compagnon_chambre, montant_total, virement_effectue,
-    accept_conditions, accept_certif
+    formule, partage_chambre, compagnon_chambre, montant_total, virement_effectue,
+    accept_conditions, accept_certif, accept_rgpd
   } = body;
-  let accomp_formule = body.accomp_formule;
-  if (Array.isArray(accomp_formule)) accomp_formule = accomp_formule.join(', ');
 
-  if (!prenom || !nom || !email || !sexe || !date_naissance || !telephone || !wilaya || !specialite) {
+  if (!prenom || !nom || !email || !sexe || !date_naissance || !telephone || !wilaya || !lieu_exercice || !specialite) {
     return { error: { title: 'Champs manquants', message: "Merci de compléter tous les champs obligatoires (identité, contact, spécialité) avant de soumettre le formulaire." } };
   }
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
@@ -432,9 +403,6 @@ function validateAndExtractInscription(body) {
   if (!formule) {
     return { error: { title: 'Formule manquante', message: 'Merci de choisir une formule de participation.' } };
   }
-  if (!accompagnateur) {
-    return { error: { title: 'Champ manquant', message: "Merci d'indiquer si vous avez un accompagnateur." } };
-  }
   if (!partage_chambre) {
     return { error: { title: 'Champ manquant', message: 'Merci d\'indiquer si vous souhaitez partager votre chambre.' } };
   }
@@ -444,21 +412,20 @@ function validateAndExtractInscription(body) {
   if (!accept_conditions || !accept_certif) {
     return { error: { title: 'Conditions non acceptées', message: "Vous devez accepter les conditions d'inscription et certifier l'exactitude des informations pour continuer." } };
   }
+  if (!accept_rgpd) {
+    return { error: { title: 'Consentement requis', message: "Vous devez accepter la politique de protection des données personnelles pour continuer." } };
+  }
 
   const specialiteFinale = specialite === 'Autre' && specialite_autre ? `Autre : ${specialite_autre}` : specialite;
-  const accompLienFinal = accomp_lien === 'Autre' && accomp_lien_autre ? `Autre : ${accomp_lien_autre}` : (accomp_lien || '');
 
   return {
     data: {
-      prenom, nom, sexe, date_naissance, email, telephone: telephone || '', wilaya,
+      prenom, nom, sexe, date_naissance, email, telephone: telephone || '', wilaya, lieu_exercice,
       specialite: specialiteFinale, precision_specialite: precision_specialite || '',
-      formule, accompagnateur,
-      accomp_nom: accompagnateur === 'Oui' ? (accomp_nom || '') : '',
-      accomp_sexe: accompagnateur === 'Oui' ? (accomp_sexe || '') : '',
-      accomp_lien: accompagnateur === 'Oui' ? accompLienFinal : '',
-      accomp_formule: accompagnateur === 'Oui' ? (accomp_formule || '') : '',
+      formule,
+      accompagnateur: '', accomp_nom: '', accomp_sexe: '', accomp_lien: '', accomp_formule: '',
       partage_chambre, compagnon_chambre: partage_chambre === 'Oui' ? (compagnon_chambre || '') : '',
-      montant_total: montant_total ? parseFloat(montant_total) || null : null,
+      montant_total: (montant_total !== undefined && montant_total !== '' && !isNaN(parseFloat(montant_total))) ? parseFloat(montant_total) : null,
       virement_effectue
     }
   };
@@ -701,7 +668,7 @@ app.post('/inscription/:congresId', inscriptionLimiter, express.urlencoded({ ext
 
     await insertInscription({
       congres_id: congresId, prenom: d.prenom, nom: d.nom, sexe: d.sexe, date_naissance: d.date_naissance,
-      email: d.email, telephone: d.telephone, wilaya: d.wilaya, specialite: d.specialite,
+      email: d.email, telephone: d.telephone, wilaya: d.wilaya, lieu_exercice: d.lieu_exercice, specialite: d.specialite,
       precision_specialite: d.precision_specialite, formule: d.formule, accompagnateur: d.accompagnateur,
       accomp_nom: d.accomp_nom, accomp_sexe: d.accomp_sexe, accomp_lien: d.accomp_lien, accomp_formule: d.accomp_formule,
       partage_chambre: d.partage_chambre, compagnon_chambre: d.compagnon_chambre, montant_total: d.montant_total,
