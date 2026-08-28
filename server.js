@@ -115,6 +115,48 @@ function escapeHtml(str) {
   }[c]));
 }
 
+// ── Authentification légère pour l'accès organisateurs distant (page Programme) ──
+const crypto = require('crypto');
+// Secret stable pour ce déploiement, dérivé de la clé de service (déjà secrète et fixe).
+const SESSION_SECRET = crypto.createHash('sha256').update(SUPABASE_SERVICE_KEY + ':session').digest('hex');
+
+function hashPassword(pw) {
+  const salt = crypto.randomBytes(16).toString('hex');
+  const hash = crypto.scryptSync(pw, salt, 64).toString('hex');
+  return `${salt}:${hash}`;
+}
+function verifyPassword(pw, stored) {
+  if (!stored || !stored.includes(':')) return false;
+  const [salt, hash] = stored.split(':');
+  const check = crypto.scryptSync(pw, salt, 64).toString('hex');
+  try { return crypto.timingSafeEqual(Buffer.from(hash, 'hex'), Buffer.from(check, 'hex')); }
+  catch { return false; }
+}
+function signSessionToken(congresId) {
+  const expiry = Date.now() + 1000 * 60 * 60 * 24 * 7; // 7 jours
+  const payload = `${congresId}.${expiry}`;
+  const sig = crypto.createHmac('sha256', SESSION_SECRET).update(payload).digest('hex');
+  return `${payload}.${sig}`;
+}
+function verifySessionToken(token, congresId) {
+  if (!token) return false;
+  const parts = token.split('.');
+  if (parts.length !== 3) return false;
+  const [cid, expiry, sig] = parts;
+  if (cid !== String(congresId)) return false;
+  if (Date.now() > parseInt(expiry, 10)) return false;
+  const expected = crypto.createHmac('sha256', SESSION_SECRET).update(`${cid}.${expiry}`).digest('hex');
+  try { return crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected)); }
+  catch { return false; }
+}
+function getCookie(req, name) {
+  const header = req.headers.cookie;
+  if (!header) return null;
+  const match = header.split(';').map(c => c.trim()).find(c => c.startsWith(name + '='));
+  return match ? decodeURIComponent(match.split('=').slice(1).join('=')) : null;
+}
+
+
 function pageLayout(title, bodyHtml) {
   return `<!DOCTYPE html>
 <html lang="fr"><head>
@@ -625,6 +667,211 @@ async function insertInscription(row) {
   if (!res.ok) throw new Error(`Supabase (inscription) HTTP ${res.status} — ${await res.text()}`);
 }
 
+// ── Programme public (sessions + hôtels + transport) ────────────────────────
+async function getSessionsPubliques(congresId) {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/sessions_publiques?congres_id=eq.${congresId}&select=*&order=date_session.asc,heure_debut.asc`, { headers: sbHeaders() });
+  if (!res.ok) return [];
+  return res.json();
+}
+async function getHotelsPublics(congresId) {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/hotels_publics?congres_id=eq.${congresId}&select=*&order=nom.asc`, { headers: sbHeaders() });
+  if (!res.ok) return [];
+  return res.json();
+}
+async function getProgrammeConfig(congresId) {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/programme_public_config?congres_id=eq.${congresId}&select=*&limit=1`, { headers: sbHeaders() });
+  if (!res.ok) return null;
+  const rows = await res.json();
+  return rows[0] || null;
+}
+async function insertSessionPublique(row) {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/sessions_publiques`, {
+    method: 'POST', headers: sbHeaders({ 'Content-Type': 'application/json', Prefer: 'return=minimal' }), body: JSON.stringify(row)
+  });
+  if (!res.ok) throw new Error(`Supabase (session) HTTP ${res.status} — ${await res.text()}`);
+}
+async function deleteSessionPublique(id, congresId) {
+  await fetch(`${SUPABASE_URL}/rest/v1/sessions_publiques?id=eq.${id}&congres_id=eq.${congresId}`, { method: 'DELETE', headers: sbHeaders() });
+}
+async function insertHotelPublic(row) {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/hotels_publics`, {
+    method: 'POST', headers: sbHeaders({ 'Content-Type': 'application/json', Prefer: 'return=minimal' }), body: JSON.stringify(row)
+  });
+  if (!res.ok) throw new Error(`Supabase (hôtel) HTTP ${res.status} — ${await res.text()}`);
+}
+async function deleteHotelPublic(id, congresId) {
+  await fetch(`${SUPABASE_URL}/rest/v1/hotels_publics?id=eq.${id}&congres_id=eq.${congresId}`, { method: 'DELETE', headers: sbHeaders() });
+}
+async function upsertProgrammeConfig(congresId, fields) {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/programme_public_config`, {
+    method: 'POST',
+    headers: sbHeaders({ 'Content-Type': 'application/json', Prefer: 'resolution=merge-duplicates,return=minimal' }),
+    body: JSON.stringify({ congres_id: congresId, ...fields, updated_at: new Date().toISOString() })
+  });
+  if (!res.ok) throw new Error(`Supabase (config programme) HTTP ${res.status} — ${await res.text()}`);
+}
+
+const TYPE_SESSION_LABELS = {
+  conference: '🎤 Conférence', atelier: '🛠️ Atelier', poster: '📋 Poster',
+  symposium: '🎓 Symposium', pause: '☕ Pause', autre: '📌 Autre'
+};
+
+function buildProgrammeHtml(congresNom, sessionsByDay, hotels, transportInfo, congresId, isOrganisateur) {
+  const jours = Object.keys(sessionsByDay).sort();
+  const fmtDate = (d) => { try { return new Date(d).toLocaleDateString('fr-FR', { weekday:'long', day:'2-digit', month:'long' }); } catch { return d; } };
+
+  const tabsHtml = jours.map((j, i) => `<button type="button" class="jour-tab ${i===0?'active':''}" data-jour="${j}">${escapeHtml(fmtDate(j))}</button>`).join('');
+
+  const panelsHtml = jours.map((j, i) => `
+    <div class="jour-panel" data-jour="${j}" style="${i===0?'':'display:none'}">
+      ${sessionsByDay[j].map(s => `
+        <div class="session-item">
+          <div class="session-heure">${escapeHtml(s.heure_debut)} – ${escapeHtml(s.heure_fin)}</div>
+          <div class="session-body">
+            <div class="session-titre">${escapeHtml(s.titre)}</div>
+            <div class="session-meta">
+              <span class="session-badge">${TYPE_SESSION_LABELS[s.type_session] || s.type_session}</span>
+              ${s.salle ? `<span class="session-salle">📍 ${escapeHtml(s.salle)}</span>` : ''}
+            </div>
+            ${s.description ? `<div class="session-desc">${escapeHtml(s.description)}</div>` : ''}
+          </div>
+          ${isOrganisateur ? `
+            <form method="POST" action="/organisateurs/${congresId}/session/${s.id}/delete" onsubmit="return confirm('Supprimer cette session ?')" style="margin:0">
+              <button type="submit" class="btn-del" title="Supprimer">🗑️</button>
+            </form>` : ''}
+        </div>
+      `).join('') || '<p class="empty-txt">Aucune session ce jour-là.</p>'}
+    </div>
+  `).join('');
+
+  const hotelsHtml = hotels.map(h => `
+    <div class="hotel-item">
+      <div>
+        <div class="hotel-nom">${escapeHtml(h.nom)}${h.categorie ? ` <span class="hotel-cat">${escapeHtml(h.categorie)}</span>` : ''}</div>
+        ${h.adresse ? `<div class="hotel-detail">📍 ${escapeHtml(h.adresse)}${h.ville ? ', '+escapeHtml(h.ville) : ''}</div>` : ''}
+        ${h.distance_lieu ? `<div class="hotel-detail">🚶 ${escapeHtml(h.distance_lieu)}</div>` : ''}
+        ${h.telephone ? `<div class="hotel-detail">📞 ${escapeHtml(h.telephone)}</div>` : ''}
+      </div>
+      ${isOrganisateur ? `
+        <form method="POST" action="/organisateurs/${congresId}/hotel/${h.id}/delete" onsubmit="return confirm('Supprimer cet hôtel ?')" style="margin:0">
+          <button type="submit" class="btn-del" title="Supprimer">🗑️</button>
+        </form>` : ''}
+    </div>
+  `).join('') || '<p class="empty-txt">Aucun hôtel renseigné pour le moment.</p>';
+
+  return `
+    <div class="header">
+      <h1>${escapeHtml(congresNom)}</h1>
+      <p>Programme, hébergement & transport</p>
+      ${isOrganisateur ? `<div style="margin-top:10px"><a href="/organisateurs/${congresId}/logout" style="color:#C8DAD9;font-size:12.5px">Se déconnecter</a></div>` : ''}
+    </div>
+
+    <div class="card">
+      <h2>🗓️ Programme</h2>
+      ${jours.length ? `
+        <div class="jour-tabs">${tabsHtml}</div>
+        ${panelsHtml}
+      ` : '<p class="empty-txt">Le programme n\'a pas encore été publié.</p>'}
+      ${isOrganisateur ? `
+        <div class="conditional" style="margin-top:16px">
+          <h3 style="font-size:13.5px;margin:0 0 10px">➕ Ajouter une session</h3>
+          <form method="POST" action="/organisateurs/${congresId}/session">
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+              <div><label>Date</label><input type="date" name="date_session" required></div>
+              <div><label>Type</label>
+                <select name="type_session">
+                  ${Object.entries(TYPE_SESSION_LABELS).map(([v,l]) => `<option value="${v}">${l}</option>`).join('')}
+                </select>
+              </div>
+              <div><label>Heure début</label><input type="time" name="heure_debut" required></div>
+              <div><label>Heure fin</label><input type="time" name="heure_fin" required></div>
+            </div>
+            <label>Titre</label><input type="text" name="titre" required maxlength="200">
+            <label>Salle<span class="opt-tag">optionnel</span></label><input type="text" name="salle" maxlength="100">
+            <label>Description<span class="opt-tag">optionnel</span></label><textarea name="description" rows="2" style="width:100%;padding:10px;border:1.5px solid var(--border);border-radius:9px;font-family:inherit"></textarea>
+            <button type="submit" style="margin-top:12px">Ajouter au programme</button>
+          </form>
+        </div>` : ''}
+    </div>
+
+    <div class="card">
+      <h2>🏨 Hébergement</h2>
+      ${hotelsHtml}
+      ${isOrganisateur ? `
+        <div class="conditional" style="margin-top:16px">
+          <h3 style="font-size:13.5px;margin:0 0 10px">➕ Ajouter un hôtel</h3>
+          <form method="POST" action="/organisateurs/${congresId}/hotel">
+            <label>Nom</label><input type="text" name="nom" required maxlength="150">
+            <label>Catégorie<span class="opt-tag">optionnel</span></label><input type="text" name="categorie" placeholder="ex : 4 étoiles" maxlength="50">
+            <label>Adresse<span class="opt-tag">optionnel</span></label><input type="text" name="adresse" maxlength="200">
+            <label>Ville<span class="opt-tag">optionnel</span></label><input type="text" name="ville" maxlength="100">
+            <label>Distance du lieu du congrès<span class="opt-tag">optionnel</span></label><input type="text" name="distance_lieu" placeholder="ex : 5 min à pied" maxlength="100">
+            <label>Téléphone<span class="opt-tag">optionnel</span></label><input type="text" name="telephone" maxlength="30">
+            <button type="submit" style="margin-top:12px">Ajouter l'hôtel</button>
+          </form>
+        </div>` : ''}
+    </div>
+
+    <div class="card">
+      <h2>🚌 Transport</h2>
+      ${isOrganisateur ? `
+        <form method="POST" action="/organisateurs/${congresId}/transport">
+          <textarea name="transport_info" rows="5" style="width:100%;padding:10px;border:1.5px solid var(--border);border-radius:9px;font-family:inherit">${escapeHtml(transportInfo || '')}</textarea>
+          <button type="submit" style="margin-top:12px">Enregistrer</button>
+        </form>
+      ` : (transportInfo ? `<div class="txt" style="white-space:pre-wrap">${escapeHtml(transportInfo)}</div>` : '<p class="empty-txt">Aucune information de transport pour le moment.</p>')}
+    </div>
+
+    <style>
+      .jour-tabs{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px}
+      .jour-tab{padding:8px 14px;border:1.5px solid var(--border);border-radius:100px;background:#fff;font-size:12.5px;font-weight:600;color:var(--ink-soft);cursor:pointer;text-transform:capitalize}
+      .jour-tab.active{background:var(--primary);color:#fff;border-color:var(--primary)}
+      .session-item{display:flex;gap:14px;padding:12px 0;border-bottom:1px solid var(--border)}
+      .session-item:last-child{border-bottom:none}
+      .session-heure{flex-shrink:0;width:100px;font-family:'IBM Plex Mono',monospace;font-size:12px;color:var(--primary);font-weight:600;padding-top:2px}
+      .session-body{flex:1}
+      .session-titre{font-weight:600;font-size:14px;color:var(--ink)}
+      .session-meta{display:flex;gap:10px;margin-top:4px;flex-wrap:wrap}
+      .session-badge{font-size:11px;background:var(--accent-soft);color:var(--primary);padding:2px 9px;border-radius:100px;font-weight:600}
+      .session-salle{font-size:11.5px;color:var(--ink-soft)}
+      .session-desc{font-size:12.5px;color:var(--ink-soft);margin-top:5px}
+      .hotel-item{display:flex;justify-content:space-between;align-items:flex-start;gap:10px;padding:12px 0;border-bottom:1px solid var(--border)}
+      .hotel-item:last-child{border-bottom:none}
+      .hotel-nom{font-weight:600;font-size:14px}
+      .hotel-cat{font-size:11px;color:var(--ink-soft);font-weight:500}
+      .hotel-detail{font-size:12px;color:var(--ink-soft);margin-top:3px}
+      .empty-txt{font-size:13px;color:var(--ink-soft);font-style:italic}
+      .btn-del{background:none;border:none;font-size:15px;cursor:pointer;opacity:.6;padding:4px}
+      .btn-del:hover{opacity:1}
+    </style>
+    <script>
+      document.querySelectorAll('.jour-tab').forEach(function(tab){
+        tab.addEventListener('click', function(){
+          document.querySelectorAll('.jour-tab').forEach(function(t){t.classList.remove('active')});
+          document.querySelectorAll('.jour-panel').forEach(function(p){p.style.display='none'});
+          tab.classList.add('active');
+          document.querySelector('.jour-panel[data-jour="'+tab.dataset.jour+'"]').style.display='block';
+        });
+      });
+    </script>
+  `;
+}
+
+function buildOrganisateurLoginHtml(congresId, error, hasPassword) {
+  return `
+    <div class="header"><h1>Accès organisateurs</h1><p>Connexion requise</p></div>
+    <div class="card">
+      ${error ? `<div class="alert">${escapeHtml(error)}</div>` : ''}
+      ${!hasPassword ? `<p style="font-size:13px;color:var(--ink-soft);margin-bottom:14px">Aucun mot de passe n'est encore défini pour cet espace. Choisissez-en un maintenant — il sera demandé à chaque prochaine connexion.</p>` : ''}
+      <form method="POST" action="/organisateurs/${congresId}/login">
+        <label>${hasPassword ? 'Mot de passe' : 'Choisir un mot de passe'}</label>
+        <input type="password" name="password" required minlength="4" autofocus>
+        <button type="submit" style="margin-top:14px">${hasPassword ? 'Se connecter' : 'Définir et se connecter'}</button>
+      </form>
+    </div>
+  `;
+}
+
 const inscriptionLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, max: 20, standardHeaders: true, legacyHeaders: false,
   message: { error: "Trop d'inscriptions envoyées depuis cette adresse. Réessayez plus tard." },
@@ -882,6 +1129,151 @@ app.post('/paiement/:factureId/simuler', paiementLimiter, express.urlencoded({ e
     }
   } catch (e) {
     console.error('[POST /paiement/simuler]', e.message);
+    res.status(500).send(pageLayout('Erreur', `<div class="success"><div class="icon">❌</div><h1>Erreur</h1><p>${escapeHtml(e.message)}</p></div>`));
+  }
+});
+
+// ─── Programme public (lecture seule, sans mot de passe) ──────────────────
+app.get('/programme/:congresId', async (req, res) => {
+  const congresId = parseInt(req.params.congresId);
+  try {
+    const config = await getProgrammeConfig(congresId);
+    const sessions = await getSessionsPubliques(congresId);
+    const hotels = await getHotelsPublics(congresId);
+    // Le nom du congrès est repris de la config d'inscription publiée (déjà poussée par l'app)
+    const inscConfig = await getInscriptionConfig(congresId);
+    const congresNom = inscConfig?.congres_nom || `Congrès #${congresId}`;
+
+    const sessionsByDay = {};
+    sessions.forEach(s => { (sessionsByDay[s.date_session] = sessionsByDay[s.date_session] || []).push(s); });
+
+    res.send(pageLayout(congresNom, buildProgrammeHtml(congresNom, sessionsByDay, hotels, config?.transport_info, congresId, false)));
+  } catch (e) {
+    console.error('[GET /programme]', e.message);
+    res.status(500).send(pageLayout('Erreur', `<div class="success"><div class="icon">❌</div><h1>Erreur serveur</h1></div>`));
+  }
+});
+
+// ─── Accès organisateurs (protégé par mot de passe, lecture + édition) ────
+app.get('/organisateurs/:congresId', async (req, res) => {
+  const congresId = parseInt(req.params.congresId);
+  try {
+    const config = await getProgrammeConfig(congresId);
+    const token = getCookie(req, `orga_${congresId}`);
+    const authed = verifySessionToken(token, congresId);
+
+    if (!authed) {
+      return res.send(pageLayout('Accès organisateurs', buildOrganisateurLoginHtml(congresId, null, !!(config && config.mot_de_passe_hash))));
+    }
+
+    const sessions = await getSessionsPubliques(congresId);
+    const hotels = await getHotelsPublics(congresId);
+    const inscConfig = await getInscriptionConfig(congresId);
+    const congresNom = inscConfig?.congres_nom || `Congrès #${congresId}`;
+    const sessionsByDay = {};
+    sessions.forEach(s => { (sessionsByDay[s.date_session] = sessionsByDay[s.date_session] || []).push(s); });
+
+    res.send(pageLayout(congresNom, buildProgrammeHtml(congresNom, sessionsByDay, hotels, config?.transport_info, congresId, true)));
+  } catch (e) {
+    console.error('[GET /organisateurs]', e.message);
+    res.status(500).send(pageLayout('Erreur', `<div class="success"><div class="icon">❌</div><h1>Erreur serveur</h1></div>`));
+  }
+});
+
+app.post('/organisateurs/:congresId/login', express.urlencoded({ extended: true }), async (req, res) => {
+  const congresId = parseInt(req.params.congresId);
+  try {
+    const { password } = req.body;
+    if (!password || password.length < 4) {
+      return res.send(pageLayout('Accès organisateurs', buildOrganisateurLoginHtml(congresId, 'Le mot de passe doit contenir au moins 4 caractères.', false)));
+    }
+    const config = await getProgrammeConfig(congresId);
+
+    if (!config || !config.mot_de_passe_hash) {
+      await upsertProgrammeConfig(congresId, { mot_de_passe_hash: hashPassword(password) });
+    } else if (!verifyPassword(password, config.mot_de_passe_hash)) {
+      return res.send(pageLayout('Accès organisateurs', buildOrganisateurLoginHtml(congresId, 'Mot de passe incorrect.', true)));
+    }
+
+    const token = signSessionToken(congresId);
+    res.setHeader('Set-Cookie', `orga_${congresId}=${encodeURIComponent(token)}; HttpOnly; Path=/; Max-Age=${60*60*24*7}; SameSite=Lax`);
+    res.redirect(`/organisateurs/${congresId}`);
+  } catch (e) {
+    console.error('[POST /organisateurs/login]', e.message);
+    res.status(500).send(pageLayout('Erreur', `<div class="success"><div class="icon">❌</div><h1>Erreur</h1><p>${escapeHtml(e.message)}</p></div>`));
+  }
+});
+
+app.get('/organisateurs/:congresId/logout', (req, res) => {
+  const congresId = parseInt(req.params.congresId);
+  res.setHeader('Set-Cookie', `orga_${congresId}=; HttpOnly; Path=/; Max-Age=0`);
+  res.redirect(`/programme/${congresId}`);
+});
+
+function requireOrganisateurCloud(req, res, congresId) {
+  const token = getCookie(req, `orga_${congresId}`);
+  if (!verifySessionToken(token, congresId)) { res.redirect(`/organisateurs/${congresId}`); return false; }
+  return true;
+}
+
+app.post('/organisateurs/:congresId/session', express.urlencoded({ extended: true }), async (req, res) => {
+  const congresId = parseInt(req.params.congresId);
+  if (!requireOrganisateurCloud(req, res, congresId)) return;
+  try {
+    const { titre, type_session, date_session, heure_debut, heure_fin, salle, description } = req.body;
+    if (titre && date_session && heure_debut && heure_fin) {
+      await insertSessionPublique({
+        congres_id: congresId, titre, description: description || null,
+        type_session: type_session || 'conference', date_session, heure_debut, heure_fin, salle: salle || null
+      });
+    }
+    res.redirect(`/organisateurs/${congresId}`);
+  } catch (e) {
+    console.error('[POST /organisateurs/session]', e.message);
+    res.status(500).send(pageLayout('Erreur', `<div class="success"><div class="icon">❌</div><h1>Erreur</h1><p>${escapeHtml(e.message)}</p></div>`));
+  }
+});
+
+app.post('/organisateurs/:congresId/session/:sessionId/delete', async (req, res) => {
+  const congresId = parseInt(req.params.congresId);
+  if (!requireOrganisateurCloud(req, res, congresId)) return;
+  await deleteSessionPublique(parseInt(req.params.sessionId), congresId);
+  res.redirect(`/organisateurs/${congresId}`);
+});
+
+app.post('/organisateurs/:congresId/hotel', express.urlencoded({ extended: true }), async (req, res) => {
+  const congresId = parseInt(req.params.congresId);
+  if (!requireOrganisateurCloud(req, res, congresId)) return;
+  try {
+    const { nom, categorie, adresse, ville, distance_lieu, telephone } = req.body;
+    if (nom) {
+      await insertHotelPublic({
+        congres_id: congresId, nom, categorie: categorie || null, adresse: adresse || null,
+        ville: ville || null, distance_lieu: distance_lieu || null, telephone: telephone || null
+      });
+    }
+    res.redirect(`/organisateurs/${congresId}`);
+  } catch (e) {
+    console.error('[POST /organisateurs/hotel]', e.message);
+    res.status(500).send(pageLayout('Erreur', `<div class="success"><div class="icon">❌</div><h1>Erreur</h1><p>${escapeHtml(e.message)}</p></div>`));
+  }
+});
+
+app.post('/organisateurs/:congresId/hotel/:hotelId/delete', async (req, res) => {
+  const congresId = parseInt(req.params.congresId);
+  if (!requireOrganisateurCloud(req, res, congresId)) return;
+  await deleteHotelPublic(parseInt(req.params.hotelId), congresId);
+  res.redirect(`/organisateurs/${congresId}`);
+});
+
+app.post('/organisateurs/:congresId/transport', express.urlencoded({ extended: true }), async (req, res) => {
+  const congresId = parseInt(req.params.congresId);
+  if (!requireOrganisateurCloud(req, res, congresId)) return;
+  try {
+    await upsertProgrammeConfig(congresId, { transport_info: req.body.transport_info || '' });
+    res.redirect(`/organisateurs/${congresId}`);
+  } catch (e) {
+    console.error('[POST /organisateurs/transport]', e.message);
     res.status(500).send(pageLayout('Erreur', `<div class="success"><div class="icon">❌</div><h1>Erreur</h1><p>${escapeHtml(e.message)}</p></div>`));
   }
 });
